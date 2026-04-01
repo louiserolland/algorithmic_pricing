@@ -1,0 +1,17 @@
+
+Running quick baseline sanity check (n=2, delta=0.95, mu=0.25)...
+  (Uses full convergence criterion — may take 1-3 min)
+  Baseline Delta = 0.736  (Calvano target: ~0.85 at baseline)
+  Converged: True
+
+============================================================
+  Calvano DGP Simulation — D300 Project
+============================================================
+
+  Total sessions : 1080
+  CPU workers    : 7
+  Q-learning iter: 5,000,000
+  Mode           : FULL
+
+  Starting simulation...
+  

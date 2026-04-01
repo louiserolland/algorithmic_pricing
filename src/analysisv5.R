@@ -39,7 +39,7 @@ set.seed(42)
 setwd(dirname(rstudioapi::getSourceEditorContext()$path))
 
 # Change path if using fast mode output
-df <- read.csv("../data/simulation_data_v2.csv")
+df <- read.csv("../data/simulation_data_v4fin.csv")
 
 cat("Dataset dimensions:", nrow(df), "x", ncol(df), "\n")
 cat("Columns:", paste(names(df), collapse=", "), "\n\n")

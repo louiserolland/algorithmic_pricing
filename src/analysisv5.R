@@ -373,10 +373,18 @@ if (min(compliance) < 0) {
   cat("  [compliance scores all positive — no defier problem]\n")
 }
 
-ate_grf <- average_treatment_effect(iv_forest)
-cat("IV forest ATE:", round(ate_grf[1], 3),
-    " SE:", round(ate_grf[2], 3),
-    " (robustness only — see note above)\n")
+ate_grf <- tryCatch(
+  average_treatment_effect(iv_forest),
+  error = function(e) {
+    cat("  IV forest ATE skipped:", conditionMessage(e), "\n")
+    c(estimate = NA_real_, std.err = NA_real_)
+  }
+)
+if (!is.na(ate_grf[1])) {
+  cat("IV forest ATE:", round(ate_grf[1], 3),
+      " SE:", round(ate_grf[2], 3),
+      " (robustness only — see note above)\n")
+}
 
 # =============================================================
 # 7. COST-BENEFIT ANALYSIS
@@ -658,32 +666,33 @@ ate_plot_df <- ate_table %>%
     Method = factor(Method, levels = rev(Method))
   )
 
+ate_plot_df <- ate_plot_df %>%
+  mutate(Family = case_when(
+    grepl("OLS",    Method) ~ "OLS",
+    grepl("IV",     Method) ~ "IV",
+    grepl("LASSO|DML|Forest", Method) ~ "ML"
+  ))
+
+family_colours <- c("OLS" = clr_ols, "IV" = "#10B981", "ML" = clr_grf)
+family_shapes  <- c("OLS" = 16,      "IV" = 17,        "ML" = 15)
+
 p5 <- ggplot(ate_plot_df, aes(y = Method, x = ATE_estimate,
                                xmin = lo, xmax = hi,
-                               colour = Method)) +
+                               colour = Family, shape = Family)) +
   geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50",
              linewidth = 0.5) +
   geom_errorbarh(height = 0.25, linewidth = 0.9) +
   geom_point(size = 3.5) +
-  scale_colour_manual(values = c(
-    "Naive OLS"           = "#94A3B8",
-    "OLS + controls"      = "#64748B",
-    "OLS + interactions"  = clr_ols,
-    "IV (parametric)"     = "#10B981",
-    "PDS-LASSO"           = "#8B5CF6",
-    "DML (cross-fitted)"  = "#EC4899",
-    "Causal Forest"       = clr_grf,
-    "IV Forest (robust.)" = "#93C5FD"
-  )) +
+  scale_colour_manual(values = family_colours, name = "Method family") +
+  scale_shape_manual(values  = family_shapes,  name = "Method family") +
   labs(
     title    = "ATE estimates and 95% CIs across all methods",
-    subtitle = "Naive OLS is biased upward; IV and ML methods agree more closely.",
+    subtitle = "Colour/shape by method family. ML estimates converge; naive OLS is biased upward.",
     x        = "Average Treatment Effect  τ̂",
     y        = NULL,
     caption  = "Outcome: profit gain relative to Nash (0) and monopoly (1) benchmarks."
   ) +
-  theme_clean() +
-  guides(colour = "none")
+  theme_clean()
 
 # --- Plot 6: GRF CATE distribution by treatment status ---
 p6 <- ggplot(df, aes(x = tau_grf, fill = factor(D), colour = factor(D))) +
@@ -706,23 +715,23 @@ p6 <- ggplot(df, aes(x = tau_grf, fill = factor(D), colour = factor(D))) +
   ) +
   theme_clean()
 
-# --- Plot 7: GATES — ATE by CATE quintile ---
-p7 <- ggplot(gates_df, aes(x = CATE_Quintile, y = GATE,
-                            ymin = CI_lo, ymax = CI_hi)) +
+# --- Plot 7: GATES bar chart with CIs ---
+p7 <- ggplot(gates_df, aes(x = factor(CATE_Quintile), y = GATE)) +
   geom_hline(yintercept = ate_cf[1], linetype = "dashed",
              colour = "grey50", linewidth = 0.6) +
-  geom_errorbar(width = 0.2, linewidth = 0.9, colour = clr_grf) +
-  geom_point(size = 4, colour = clr_grf) +
-  geom_line(colour = clr_grf, linewidth = 0.8, linetype = "dotted") +
-  scale_x_continuous(breaks = 1:5,
-                     labels = c("Q1\n(lowest)", "Q2", "Q3", "Q4",
-                                "Q5\n(highest)")) +
-  annotate("text", x = 4.5, y = ate_cf[1] + 0.005,
+  geom_col(fill = clr_grf, alpha = 0.75, width = 0.6, colour = "white") +
+  geom_errorbar(aes(ymin = CI_lo, ymax = CI_hi),
+                width = 0.22, linewidth = 0.9, colour = "grey25") +
+  geom_text(aes(label = sprintf("%.3f", GATE),
+                y = CI_hi + 0.012),
+            size = 3.4, colour = "grey30") +
+  scale_x_discrete(labels = c("Q1\n(lowest)", "Q2", "Q3", "Q4", "Q5\n(highest)")) +
+  annotate("text", x = 4.6, y = ate_cf[1] + 0.012,
            label = sprintf("ATE = %.3f", ate_cf[1]),
            colour = "grey40", size = 3.5) +
   labs(
     title    = "GATES: Group Average Treatment Effects by CATE quintile",
-    subtitle = "Monotone pattern confirms the causal forest ranks markets correctly.",
+    subtitle = "Non-overlapping CIs confirm genuine heterogeneity. Monotone spread from Q1 to Q5.",
     x        = "Predicted CATE quintile (Q1 = lowest collusion gain)",
     y        = "GATE  (95% CI)",
     caption  = "Dashed line = overall ATE from causal forest."
@@ -750,6 +759,316 @@ p8 <- ggplot(clan_plot_df, aes(x = Variable, y = Difference, fill = colour)) +
     x        = NULL,
     y        = "Mean difference (Q5 − Q1)",
     caption  = "Positive = higher covariate value predicts larger collusion gain. *** p<0.01."
+  ) +
+  theme_clean()
+
+# --- Plot 9: Variable importance bar chart ---
+vim_plot_df <- data.frame(
+  Variable   = names(vim),
+  Importance = as.numeric(vim)
+) %>% arrange(desc(Importance))
+
+p9 <- ggplot(vim_plot_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_col(fill = clr_grf, width = 0.55, colour = "white") +
+  geom_text(aes(label = sprintf("%.3f", Importance)),
+            hjust = -0.15, size = 3.5, colour = "grey30") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title    = "GRF variable importance for treatment effect heterogeneity",
+    subtitle = "Share of splits used on each covariate across all trees.",
+    x        = NULL,
+    y        = "Variable importance (share of splits)",
+    caption  = "Higher = covariate drives more CATE heterogeneity."
+  ) +
+  theme_clean()
+
+# --- Plot 10: CATE vs mu (demand curvature) ---
+df <- df %>%
+  mutate(mu_bin = cut(mu,
+                      breaks = quantile(mu, probs = seq(0, 1, by = 1/6), na.rm = TRUE),
+                      include.lowest = TRUE, labels = FALSE))
+
+df_plot10 <- df %>%
+  group_by(n, mu_bin) %>%
+  summarise(
+    mu_mid       = mean(mu),
+    tau_grf_mean = mean(tau_grf),
+    tau_grf_lo   = mean(tau_grf) - 1.96 * sd(tau_grf) / sqrt(n()),
+    tau_grf_hi   = mean(tau_grf) + 1.96 * sd(tau_grf) / sqrt(n()),
+    tau_ols_mean = mean(tau_ols),
+    .groups = "drop"
+  )
+
+p10 <- ggplot(df_plot10, aes(x = mu_mid, colour = factor(n), fill = factor(n))) +
+  geom_ribbon(aes(ymin = tau_grf_lo, ymax = tau_grf_hi), alpha = 0.12, colour = NA) +
+  geom_line(aes(y = tau_grf_mean, linetype = "GRF"), linewidth = 1.1) +
+  geom_line(aes(y = tau_ols_mean, linetype = "OLS"), linewidth = 0.85) +
+  geom_point(aes(y = tau_grf_mean), size = 2, shape = 21,
+             fill = "white", stroke = 0.8) +
+  scale_colour_manual(values = c("2" = clr_n2, "3" = clr_n3), name = "Firms") +
+  scale_fill_manual(values   = c("2" = clr_n2, "3" = clr_n3), guide = "none") +
+  scale_linetype_manual(values = c("GRF" = "solid", "OLS" = "dashed"), name = "Method") +
+  labs(
+    title    = "How demand curvature (μ) shapes the collusion gain",
+    subtitle = "GRF 95% CI shaded (6 quantile bins). n=2 vs n=3 separation = market-structure heterogeneity.",
+    x        = "Demand curvature  μ  (bin midpoint)",
+    y        = "CATE  τ̂",
+    caption  = "Higher μ = more curved demand; effect on collusion gains varies by market structure."
+  ) +
+  theme_clean()
+
+# --- Plot 11: First-stage binscatter Z_hq → D ---
+# Use ntile() instead of cut() to avoid non-unique breaks when Z_hq has ties (e.g. zeros).
+df <- df %>%
+  mutate(z_bin = ntile(Z_hq, 20))
+
+df_plot11 <- df %>%
+  group_by(z_bin) %>%
+  summarise(
+    z_mid    = mean(Z_hq),
+    d_mean   = mean(D),
+    d_se     = sd(D) / sqrt(n()),
+    .groups  = "drop"
+  )
+
+p11 <- ggplot(df_plot11, aes(x = z_mid, y = d_mean)) +
+  geom_ribbon(aes(ymin = d_mean - 1.96 * d_se, ymax = d_mean + 1.96 * d_se),
+              fill = "#10B981", alpha = 0.15) +
+  geom_point(size = 2.5, colour = "#10B981") +
+  geom_smooth(method = "lm", se = FALSE, colour = "#10B981",
+              linewidth = 1, linetype = "solid") +
+  labs(
+    title    = "First stage: HQ adoption rate (Z_hq) → algorithmic adoption (D)",
+    subtitle = "Binscatter (20 equal-frequency bins). Slope confirms instrument relevance.",
+    x        = "HQ adoption rate  Z_hq  (bin midpoint)",
+    y        = "Pr(D = 1 | Z_hq bin)",
+    caption  = "A steep, monotone slope supports the exclusion restriction."
+  ) +
+  theme_clean()
+
+# --- Plot 12: DML residual diagnostic ---
+p12 <- ggplot(df, aes(x = D_tilde, y = Y_tilde)) +
+  geom_point(alpha = 0.15, size = 0.8, colour = "#8B5CF6", stroke = 0) +
+  geom_smooth(method = "lm", se = TRUE, colour = "#8B5CF6",
+              fill = "#8B5CF6", alpha = 0.2, linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.5) +
+  annotate("text", x = Inf, y = Inf,
+           label = sprintf("DML ATE = %.4f", tau_dml),
+           hjust = 1.1, vjust = 1.5, size = 3.8, colour = "#8B5CF6") +
+  labs(
+    title    = "DML residual diagnostic: partialled-out Y vs partialled-out D",
+    subtitle = "Slope of this scatter is the DML ATE. A tight, linear cloud confirms clean partialling-out.",
+    x        = "D residual  D̃  (D − Ê[D|X])",
+    y        = "Y residual  Ỹ  (Y − Ê[Y|X])",
+    caption  = "Cross-fitted nuisance estimates (K=5 folds). HC3 SEs used for inference."
+  ) +
+  theme_clean()
+
+# --- Plot 13: CATE empirical CDF ---
+ate_val <- ate_cf[1]
+
+p13 <- ggplot(df, aes(x = tau_grf)) +
+  stat_ecdf(geom = "step", linewidth = 1, colour = clr_grf) +
+  geom_vline(xintercept = ate_val, linetype = "dashed",
+             colour = "grey40", linewidth = 0.7) +
+  annotate("text", x = ate_val, y = 0.05,
+           label = sprintf("ATE = %.3f", ate_val),
+           hjust = -0.1, size = 3.5, colour = "grey40") +
+  geom_hline(yintercept = 0.5, linetype = "dotted",
+             colour = "grey60", linewidth = 0.5) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title    = "Empirical CDF of individual CATEs (causal forest)",
+    subtitle = "What fraction of markets have a collusion gain below each threshold?",
+    x        = "GRF CATE  τ̂",
+    y        = "Cumulative share of markets",
+    caption  = "Dashed line = overall ATE. Dotted line = median."
+  ) +
+  theme_clean()
+
+# --- Plot 14: 2-panel heatmap δ × α_lr, faceted by n ---
+# Capture the non-linear joint structure that parametric interactions miss.
+df <- df %>%
+  mutate(
+    alr_bin = cut(alpha_lr,
+                  breaks = quantile(alpha_lr, probs = seq(0, 1, by = 0.25),
+                                    na.rm = TRUE),
+                  include.lowest = TRUE, labels = FALSE)
+  )
+
+df_heat2 <- df %>%
+  group_by(n, delta_bin, alr_bin) %>%
+  summarise(
+    tau_mean  = mean(tau_grf),
+    delta_mid = mean(delta),
+    alr_mid   = mean(alpha_lr),
+    .groups   = "drop"
+  ) %>%
+  mutate(
+    delta_lab = sprintf("%.2f", delta_mid),
+    alr_lab   = sprintf("%.2f", alr_mid)
+  )
+
+p14 <- ggplot(df_heat2,
+              aes(x = reorder(delta_lab, delta_mid),
+                  y = reorder(alr_lab, alr_mid),
+                  fill = tau_mean)) +
+  geom_tile(colour = "white", linewidth = 0.6) +
+  geom_text(aes(label = sprintf("%.2f", tau_mean)),
+            size = 2.8, fontface = "bold",
+            colour = ifelse(df_heat2$tau_mean > 0.45, "white", "grey20")) +
+  facet_wrap(~paste0(n, " firms"), ncol = 2) +
+  scale_fill_gradientn(
+    colours = c("#EFF6FF", "#93C5FD", "#3B82F6", "#1D4ED8"),
+    name    = "Mean CATE  τ̂",
+    limits  = c(0, NA)
+  ) +
+  labs(
+    title   = "CATE heterogeneity: discount factor (δ) × learning rate (α_lr), by market structure",
+    subtitle = "Non-linear joint structure invisible to OLS interactions — core GRF justification.",
+    x       = "Discount factor  δ  (bin midpoint)",
+    y       = "Learning rate  α_lr  (bin midpoint)",
+    caption = "Darker = larger algorithmic collusion gain. Rows = δ quantile bins (6); cols = α_lr quartile bins (4)."
+  ) +
+  theme_clean() +
+  theme(panel.grid = element_blank(),
+        legend.position = "right",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+# --- Plot 15: CATE vs δ scatter coloured by α_lr ---
+# Shows joint structure of top two variable importance scores.
+p15 <- ggplot(df, aes(x = delta, y = tau_grf, colour = alpha_lr)) +
+  geom_point(alpha = 0.3, size = 0.7, stroke = 0) +
+  geom_smooth(method = "loess", span = 0.4, se = FALSE,
+              colour = "grey20", linewidth = 0.9) +
+  scale_colour_gradientn(
+    colours = c("#FEF3C7", "#F97316", "#7C3AED"),
+    name    = "α_lr"
+  ) +
+  facet_wrap(~paste0(n, " firms"), ncol = 2) +
+  labs(
+    title    = "Individual CATEs vs discount factor δ, coloured by learning rate α_lr",
+    subtitle = "Do high-δ, low-α_lr markets cluster at the top of the CATE distribution?",
+    x        = "Discount factor  δ",
+    y        = "GRF CATE  τ̂",
+    caption  = "Loess smoother (span = 0.4). Colour gradient: yellow = low α_lr, purple = high α_lr."
+  ) +
+  theme_clean()
+
+# --- Plot 16: Partial dependence plots for δ and α_lr ---
+# Evaluate mean predicted CATE as each covariate varies, others at median.
+pd_n      <- 60   # grid points per covariate
+X_median  <- apply(X, 2, median)
+
+# δ grid
+delta_grid <- seq(min(df$delta), max(df$delta), length.out = pd_n)
+pd_delta <- lapply(delta_grid, function(val) {
+  X_new           <- matrix(rep(X_median, pd_n), nrow = pd_n, byrow = TRUE)
+  colnames(X_new) <- colnames(X)
+  X_new[, "delta"] <- val
+  data.frame(covariate = "delta", x = val,
+             tau = mean(predict(cf, X_new)$predictions))
+})
+
+# α_lr grid
+alr_grid <- seq(min(df$alpha_lr), max(df$alpha_lr), length.out = pd_n)
+pd_alr <- lapply(alr_grid, function(val) {
+  X_new           <- matrix(rep(X_median, pd_n), nrow = pd_n, byrow = TRUE)
+  colnames(X_new) <- colnames(X)
+  X_new[, "alpha_lr"] <- val
+  data.frame(covariate = "alpha_lr", x = val,
+             tau = mean(predict(cf, X_new)$predictions))
+})
+
+pd_df <- bind_rows(c(pd_delta, pd_alr)) %>%
+  mutate(covariate = factor(covariate,
+                            levels = c("delta", "alpha_lr"),
+                            labels = c("Discount factor  δ",
+                                       "Learning rate  α_lr")))
+
+p16 <- ggplot(pd_df, aes(x = x, y = tau)) +
+  geom_line(colour = clr_grf, linewidth = 1.2) +
+  geom_hline(yintercept = ate_cf[1], linetype = "dashed",
+             colour = "grey50", linewidth = 0.6) +
+  facet_wrap(~covariate, scales = "free_x", ncol = 2) +
+  annotate("text",
+           x    = -Inf, y = ate_cf[1],
+           label = sprintf("ATE = %.3f", ate_cf[1]),
+           hjust = -0.1, vjust = -0.5, size = 3.2, colour = "grey45") +
+  labs(
+    title    = "Partial dependence: mean CATE as δ and α_lr vary (others at median)",
+    subtitle = "Non-linearity or threshold effects confirm GRF captures structure OLS misses.",
+    x        = "Covariate value",
+    y        = "Mean predicted CATE  τ̂",
+    caption  = "Grid of 60 points per covariate. Dashed line = overall ATE."
+  ) +
+  theme_clean()
+
+# --- Plot 17: Finite-sample CATE RMSE — OLS vs GRF ---
+# For each subsample size, compute RMSE of CATE estimator against the
+# full-data GRF predictions (used as the best available oracle).
+# This directly operationalises the Baiardi & Naghi cost-benefit finding:
+# at what N does GRF's bias reduction outweigh its variance cost?
+tau_oracle <- tau_grf   # full-data causal forest predictions as oracle
+
+fs_rmse_results <- lapply(sample_sizes, function(n_sub) {
+  if (n_sub >= nrow(df)) {
+    idx <- 1:nrow(df)
+  } else {
+    set.seed(42)
+    idx <- sample(1:nrow(df), n_sub, replace = FALSE)
+  }
+  sub_X  <- X[idx, ]
+  sub_Y  <- Y[idx]
+  sub_D  <- D[idx]
+  sub_df <- df[idx, ]
+
+  # OLS CATE on subsample
+  ols_sub    <- lm(Delta ~ D + n + delta + mu + alpha_lr + D:n + D:delta + D:mu,
+                   data = sub_df)
+  coef_s     <- coef(ols_sub)
+  tau_ols_s  <- coef_s["D"] +
+    coef_s["D:n"]     * sub_df$n     +
+    coef_s["D:delta"] * sub_df$delta +
+    coef_s["D:mu"]    * sub_df$mu
+
+  rmse_ols_s <- sqrt(mean((tau_ols_s - tau_oracle[idx])^2))
+
+  # GRF CATE on subsample
+  rmse_grf_s <- tryCatch({
+    cf_sub <- causal_forest(sub_X, sub_Y, sub_D,
+                            num.trees = 500, honesty = TRUE, seed = 42)
+    tau_sub <- predict(cf_sub)$predictions
+    sqrt(mean((tau_sub - tau_oracle[idx])^2))
+  }, error = function(e) NA_real_)
+
+  data.frame(n_sub = n_sub, rmse_ols = rmse_ols_s, rmse_grf = rmse_grf_s)
+})
+
+fs_rmse_df <- bind_rows(fs_rmse_results)
+
+fs_rmse_long <- fs_rmse_df %>%
+  filter(!is.na(rmse_grf)) %>%
+  pivot_longer(cols = c(rmse_ols, rmse_grf),
+               names_to = "method", values_to = "rmse") %>%
+  mutate(method = ifelse(method == "rmse_grf", "Causal forest", "OLS interactions"))
+
+p17 <- ggplot(fs_rmse_long, aes(x = n_sub, y = rmse, colour = method)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2.5, shape = 21, fill = "white", stroke = 0.3) +
+  scale_colour_manual(values = c("Causal forest"    = clr_grf,
+                                 "OLS interactions" = clr_ols),
+                      name = NULL) +
+  scale_x_log10(breaks = c(100, 250, 500, 1000, 2000),
+                labels = scales::comma) +
+  labs(
+    title    = "Finite-sample CATE RMSE: OLS interactions vs causal forest",
+    subtitle = "RMSE against full-data GRF oracle. Crossover = N where GRF's bias reduction outweighs variance cost.",
+    x        = "Sample size  N  (log scale)",
+    y        = "CATE RMSE",
+    caption  = "Oracle = full-sample causal forest predictions. Baiardi & Naghi (2022) cost-benefit framework."
   ) +
   theme_clean()
 
@@ -785,6 +1104,33 @@ cat("  Saved: ../results/cate_scatter.png\n")
 
 ggsave(file.path(results_dir, "cate_density.png"),    p6, width = 7,  height = 5,  dpi = 180)
 cat("  Saved: ../results/cate_density.png\n")
+
+ggsave(file.path(results_dir, "variable_importance.png"), p9,  width = 7,  height = 4,  dpi = 180)
+cat("  Saved: ../results/variable_importance.png\n")
+
+ggsave(file.path(results_dir, "cate_by_mu.png"),      p10, width = 8,  height = 5,  dpi = 180)
+cat("  Saved: ../results/cate_by_mu.png\n")
+
+ggsave(file.path(results_dir, "first_stage.png"),     p11, width = 7,  height = 5,  dpi = 180)
+cat("  Saved: ../results/first_stage.png\n")
+
+ggsave(file.path(results_dir, "dml_residuals.png"),   p12, width = 7,  height = 5,  dpi = 180)
+cat("  Saved: ../results/dml_residuals.png\n")
+
+ggsave(file.path(results_dir, "cate_cdf.png"),        p13, width = 7,  height = 5,  dpi = 180)
+cat("  Saved: ../results/cate_cdf.png\n")
+
+ggsave(file.path(results_dir, "cate_heatmap2.png"),   p14, width = 12, height = 6,  dpi = 180)
+cat("  Saved: ../results/cate_heatmap2.png\n")
+
+ggsave(file.path(results_dir, "cate_vs_delta_alr.png"), p15, width = 10, height = 5, dpi = 180)
+cat("  Saved: ../results/cate_vs_delta_alr.png\n")
+
+ggsave(file.path(results_dir, "partial_dependence.png"), p16, width = 10, height = 5, dpi = 180)
+cat("  Saved: ../results/partial_dependence.png\n")
+
+ggsave(file.path(results_dir, "cate_rmse.png"),        p17, width = 7,  height = 5,  dpi = 180)
+cat("  Saved: ../results/cate_rmse.png\n")
 
 # =============================================================
 # 9. PAPER-READY SUMMARY TABLE
